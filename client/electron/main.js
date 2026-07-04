@@ -7,6 +7,9 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    minWidth: 800,
+    minHeight: 600,
+    backgroundColor: '#1a1a2e',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -21,8 +24,9 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
   } else {
-    // In production, load the built files
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+    // In production, load from the Flask server
+    const PROD_URL = process.env.SCRIBBLE_URL || 'http://localhost:5000';
+    mainWindow.loadURL(PROD_URL);
   }
 
   mainWindow.on('closed', () => {

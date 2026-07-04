@@ -36,7 +36,7 @@ The project uses a structured team of LLM agents:
 
 | Agent | Role | Can write code? |
 |---|---|---|
-| `project-manager` (primary) | Orchestrates process, delegates tasks, gates on human approval | No |
+| `project-manager` (primary) | Orchestrates process, delegates tasks, gates on human approval at feature completion | No |
 | `business-analyst` (subagent) | Converts requirements into tech specs (`docs/specs/`) | No |
 | `ui-ux-designer` (subagent) | Designs CLI and React Flask Electron interfaces (`docs/design/`) | No |
 | `software-developer` (subagent) | Writes Python, Javascript implementation | Yes |
@@ -51,7 +51,9 @@ Agent definitions live in `.opencode/agents/`.
 Build ONE feature at a time. Never start the next feature until the current
 one is approved by the human (client).
 
-For each feature, the Project Manager enforces this sequence:
+For each feature, the Project Manager enforces this sequence automatically,
+proceeding through all phases without stopping. Human approval is only
+required at the final APPROVE phase:
 
 ```
 1. PLAN     → Business Analyst writes tech spec in docs/specs/
@@ -71,7 +73,11 @@ For each feature, the Project Manager enforces this sequence:
               → Only proceed when Security Expert is satisfied
 5. APPROVE  → Present completed feature to human for approval
               → Human decides: approved (next feature) or revise
+              ↻ If revision needed, return to step 3 (developer fixes)
 ```
+
+The PM proceeds through phases 1–4c without pausing for human input.
+The human is only consulted at step 5 when the feature is fully built and tested.
 
 ### Code Review Standards
 

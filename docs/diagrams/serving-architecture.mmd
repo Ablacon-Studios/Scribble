@@ -1,0 +1,17 @@
+graph TB
+    subgraph "Development Mode"
+        B_DEV[Browser] -->|:5173| VITE[Vite Dev Server]
+        VITE -->|proxy /api/*| FLASK_DEV[Flask API :5000]
+        E_DEV[Electron] -->|loadURL| VITE
+        E_DEV -->|API + CORS| FLASK_DEV
+        FLASK_DEV -->|dev status page| DEV_PAGE[Status Page HTML]
+    end
+
+    subgraph "Production Mode"
+        B_PROD[Browser] -->|:5000| FLASK_PROD[Flask :5000]
+        E_PROD[Electron] -->|loadURL| FLASK_PROD
+        FLASK_PROD -->|static files| DIST[client/dist/]
+        FLASK_PROD -->|SPA fallback| INDEX[index.html]
+        FLASK_PROD -->|API| API_H[API Handlers]
+        FLASK_PROD -->|WebSocket| SIO[SocketIO]
+    end
