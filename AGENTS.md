@@ -7,6 +7,8 @@ Collaborative drawing app that allows multiple users to work on a project simult
 - AI is used by the development team (agents) for building the app. The app itself does not contain AI features for end users.
 - There are two separate dependency lists: `server/requirements.txt` (Python) and `client/package.json` (JavaScript).
 - The Electron shell loads the same React app as the web version — no separate codebase.
+- The frontend must be built (`cd client && npm run build`) before presenting a feature for approval. Tailwind CSS requires PostCSS compilation — raw `@tailwind` directives in the built CSS will cause a white screen.
+- `postcss.config.js` and `autoprefixer` must be present for Tailwind CSS to compile correctly.
 
 ## Project Boundaries
 
@@ -69,14 +71,19 @@ required at the final APPROVE phase:
               ↻ If issues found, loop back to step 4 (QA fixes tests)
               → Only proceed when Code Reviewer is satisfied
 4c. SECURITY → Security Expert reviews the implementation for vulnerabilities
-              ↻ If issues found, loop back to step 3 (developer fixes)
-              → Only proceed when Security Expert is satisfied
+               ↻ If issues found, loop back to step 3 (developer fixes)
+               → Only proceed when Security Expert is satisfied
+4d. BUILD    → Build the frontend to verify it compiles correctly
+               Run: cd client && npm run build
+               ↻ If build fails, loop back to step 3 (developer fixes)
+               → Verify the built CSS contains compiled Tailwind classes (not raw @tailwind directives)
+               → Only proceed when build succeeds
 5. APPROVE  → Present completed feature to human for approval
-              → Human decides: approved (next feature) or revise
-              ↻ If revision needed, return to step 3 (developer fixes)
+               → Human decides: approved (next feature) or revise
+               ↻ If revision needed, return to step 3 (developer fixes)
 ```
 
-The PM proceeds through phases 1–4c without pausing for human input.
+The PM proceeds through phases 1–4d without pausing for human input.
 The human is only consulted at step 5 when the feature is fully built and tested.
 
 ### Code Review Standards

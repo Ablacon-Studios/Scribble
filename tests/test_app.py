@@ -51,22 +51,37 @@ def test_create_app_development_mode(monkeypatch):
 # ---------------------------------------------------------------------------
 # Test: Production mode app creation
 # ---------------------------------------------------------------------------
-def test_create_app_production_mode(monkeypatch):
-    """In production mode, the app should have a static folder set."""
+def test_create_app_production_mode(monkeypatch, mock_dist_dir):
+    """In production mode, the app should be created and serve static files."""
     monkeypatch.setenv("FLASK_ENV", "production")
 
     app, _ = create_app()
 
-    # Production mode: static folder should be set
+    # Production mode: the SPA catch-all route should serve index.html
     assert app.static_folder is not None, (
         "Production mode should have a static folder configured"
     )
 
-    # The static_url_path should be '/assets' to avoid conflicting with
-    # the SPA fallback route (static files are served under /assets/ prefix)
-    assert app.static_url_path == "/assets", (
-        "Production mode should serve static files under /assets/ prefix"
-    )
+    # Verify the SPA route serves index.html correctly
+    with app.test_client() as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.content_type.startswith("text/html"), (
+            "Root path should serve HTML"
+        )
+
+    # Verify assets are served with correct MIME types
+    with app.test_client() as client:
+        # Find a .js file in the dist directory to test with
+        import os
+        dist = os.path.join(os.path.dirname(__file__), "..", "client", "dist", "assets")
+        js_files = [f for f in os.listdir(dist) if f.endswith(".js")] if os.path.isdir(dist) else []
+        if js_files:
+            response = client.get(f"/assets/{js_files[0]}")
+            assert response.status_code == 200
+            assert response.content_type.startswith("text/javascript"), (
+                "JS files should be served as text/javascript, not application/json"
+            )
 
 
 # ---------------------------------------------------------------------------

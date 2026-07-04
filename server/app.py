@@ -1,10 +1,20 @@
+import eventlet
+eventlet.monkey_patch()
+
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 from flask import Flask, send_from_directory
 from flask_cors import CORS
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO  # noqa: F401 – kept for type annotation
 from dotenv import load_dotenv
+
+from config import Config
+from extensions import db, socketio, limiter
+from auth import auth_bp
+from models import VerificationToken
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,7 +28,7 @@ def create_app() -> tuple[Flask, SocketIO]:
 
     if is_production:
         static_folder = Path(__file__).parent.parent / "client" / "dist"
-        app = Flask(__name__, static_folder=str(static_folder), static_url_path="/assets")
+        app = Flask(__name__)
 
         # Verify build exists
         if not (static_folder / "index.html").exists():
@@ -32,17 +42,42 @@ def create_app() -> tuple[Flask, SocketIO]:
         # CORS for dev mode
         cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173")
         origins = [o.strip() for o in cors_origins.split(",")]
-        CORS(app, resources={r"/*": {"origins": origins}})
+        CORS(app, resources={r"/*": {"origins": origins}}, supports_credentials=True)
 
-    # Initialize SocketIO (shared across modes)
+    # -- Configuration -----------------------------------------------------
+    app.config.from_object(Config)
+
+    if app.config["SECRET_KEY"] == "dev-secret-change-in-production" and env != "development":
+        logger.warning("SECRET_KEY is using the default value. Set it in production!")
+
+    # -- Extensions --------------------------------------------------------
+    db.init_app(app)
+    limiter.init_app(app)
+
     cors_allowed = (
         [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:5173").split(",")]
         if not is_production
         else []
     )
-    socketio = SocketIO(
-        app, cors_allowed_origins=cors_allowed, async_mode="eventlet"
-    )
+    socketio.init_app(app, cors_allowed_origins=cors_allowed, async_mode="eventlet")
+
+    # -- Database ----------------------------------------------------------
+    instance_dir = os.path.join(os.path.dirname(__file__), "instance")
+    os.makedirs(instance_dir, exist_ok=True)
+    with app.app_context():
+        db.create_all()
+
+        # Clean up expired verification tokens older than 24 hours
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            VerificationToken.query.filter(VerificationToken.expires_at < cutoff).delete()
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            logger.warning("Token cleanup skipped: %s", e)
+
+    # -- Blueprints --------------------------------------------------------
+    app.register_blueprint(auth_bp)
 
     # --- API Routes (placeholder for future features) ---
     @app.route("/api/health")
@@ -159,4 +194,6 @@ if __name__ == "__main__":
     port = int(os.getenv("FLASK_PORT", "5000"))
     debug = os.getenv("FLASK_DEBUG", "0") == "1"
     host = os.getenv("FLASK_HOST", "127.0.0.1")
+    env = os.getenv("FLASK_ENV", "production")
+    logger.info("Starting Scribble server on http://%s:%s (mode: %s)", host, port, env)
     socketio.run(app, host=host, port=port, debug=debug)

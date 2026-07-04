@@ -1,9 +1,14 @@
 # Feature Backlog
 
 - [x] **Serve Web + Electron App from Server** — Done ✅
-  The Flask backend serves the built React frontend as static files.
-  The Electron shell loads from either the Vite dev server (development)
-  or the built static files (production). Users can access the app via
-  browser at `localhost:5000` and via the Electron desktop app.
+- [x] **User Authentication & Profile System** — Done ✅
+- [x] **Drawing Canvas — Single Color Drawing** — Done ✅
+  HTML5 Canvas freehand drawing on home page. Mouse + touch, purple color, 3px lines.
+  Approved 2026-07-04.
 
-- [ ] **(Next feature — to be defined by client)**
+- [ ] **Multiple Colors & Color Picker** — Up next
+- [ ] **Drawing Tools** — brush sizes, eraser, shapes
+- [ ] **Undo/Redo** — unlimited undo/redo
+- [ ] **Layer Support** — multiple layers per canvas
+- [ ] **Real-time Collaboration** — WebSocket sync
+- [ ] **Shared Projects** — create and share drawings between users
