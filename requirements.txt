@@ -1,0 +1,26 @@
+# Scribble — Product Requirements
+# ================================
+# 
+# Scribble is a collaborative drawing app. Multiple users can work on 
+# the same drawing project simultaneously in real time.
+#
+# This file is the source of truth for WHAT the product should do.
+# Features are defined below by the human (client) and the team builds 
+# them one at a time through the process: Plan → Design → Develop → Test → Approve.
+#
+# --- High-Level Vision ---
+# - Real-time collaborative drawing canvas
+# - Multiple user accounts with authentication
+# - Shared drawing projects
+# - Drawing tools: pencil, brush, eraser, shapes, color picker
+# - Unlimited undo/redo
+# - Layer support
+# - Web + Electron desktop client
+# - Flask REST + WebSocket backend
+#
+# --- Features (to be defined by human) ---
+# Features will be added here by the human as bullet points.
+# Example: "- [ ] Freehand pencil drawing tool"
+# Example: "- [x] Basic canvas rendering (approved)"
+#
+# (No features defined yet — awaiting human input)
