@@ -5,10 +5,22 @@ function DrawingCanvas({
   eraserModeRef = { current: false },
   eraserSizeRef = { current: 15 },
   brushSizeRef = { current: 3 },
+  shapeModeRef = { current: null },
+  onUndoReady,
+  onRedoReady,
+  onCanUndoChange,
+  onCanRedoChange,
+  onGetStrokesReady,
+  onLoadStrokesReady,
+  onDirtyChange,
+  onHasStrokesChange,
 }) {
   const canvasRef = useRef(null);
   const ctxRef = useRef(null);
   const [strokes, setStrokes] = useState([]);
+  const latestStrokesRef = useRef(strokes);
+  latestStrokesRef.current = strokes;
+  const [undoStack, setUndoStack] = useState([]);
   const isDrawingRef = useRef(false);
   const lastPointRef = useRef(null);
   const wrapperRef = useRef(null);
@@ -71,6 +83,38 @@ function DrawingCanvas({
     };
   }, []);
 
+  // Draw a shape preview or final stroke onto the canvas context
+  const drawShapePreview = useCallback((ctx, stroke) => {
+    const { startPoint, endPoint, type, color, lineWidth } = stroke;
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'miter';
+    const x = Math.min(startPoint.x, endPoint.x);
+    const y = Math.min(startPoint.y, endPoint.y);
+    const w = Math.abs(endPoint.x - startPoint.x);
+    const h = Math.abs(endPoint.y - startPoint.y);
+
+    switch (type) {
+      case 'rect':
+        ctx.strokeRect(x, y, w, h);
+        break;
+      case 'circle':
+        ctx.beginPath();
+        ctx.ellipse(x + w / 2, y + h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        break;
+      case 'line':
+        ctx.beginPath();
+        ctx.moveTo(startPoint.x, startPoint.y);
+        ctx.lineTo(endPoint.x, endPoint.y);
+        ctx.stroke();
+        break;
+    }
+    ctx.restore();
+  }, []);
+
   // Redraw all strokes onto the given context in chronological order
   const redrawAll = useCallback((ctx, allStrokes) => {
     const dpr = window.devicePixelRatio || 1;
@@ -80,9 +124,8 @@ function DrawingCanvas({
 
     // Replay strokes in chronological order
     for (const stroke of allStrokes) {
-      if (stroke.points.length === 0) continue;
-
       if (stroke.type === 'erase') {
+        if (!stroke.points || stroke.points.length === 0) continue;
         ctx.save();
         ctx.globalCompositeOperation = 'destination-out';
         const radius = (stroke.eraserSize || 15) / 2;
@@ -92,7 +135,13 @@ function DrawingCanvas({
           ctx.fill();
         }
         ctx.restore();
+      } else if (stroke.type === 'rect' || stroke.type === 'circle' || stroke.type === 'line') {
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-over';
+        drawShapePreview(ctx, stroke);
+        ctx.restore();
       } else {
+        if (!stroke.points || stroke.points.length === 0) continue;
         ctx.globalCompositeOperation = 'source-over';
         ctx.strokeStyle = stroke.color || colorRef.current;
         ctx.lineWidth = stroke.lineWidth || 3;
@@ -107,7 +156,7 @@ function DrawingCanvas({
 
     // Reset composite operation to default
     ctx.globalCompositeOperation = 'source-over';
-  }, [colorRef]);
+  }, [colorRef, drawShapePreview]);
 
   // Resize handler — recalculates canvas pixel dimensions and redraws
   const resizeCanvas = useCallback(() => {
@@ -147,6 +196,86 @@ function DrawingCanvas({
     return () => observer.disconnect();
   }, [resizeCanvas]);
 
+  // --- Undo / Redo ---
+
+  const undo = useCallback(() => {
+    if (isDrawingRef.current) return; // don't undo mid-stroke
+    setStrokes((prev) => {
+      if (prev.length === 0) return prev;
+      const lastStroke = prev[prev.length - 1];
+      setUndoStack((s) => [lastStroke, ...s]);
+      return prev.slice(0, -1);
+    });
+    if (onDirtyChange) onDirtyChange(true);
+  }, [onDirtyChange]);
+
+  const redo = useCallback(() => {
+    if (isDrawingRef.current) return; // don't redo mid-stroke
+    setUndoStack((prevUndo) => {
+      if (prevUndo.length === 0) return prevUndo;
+      const restoredStroke = prevUndo[0];
+      setStrokes((prevStrokes) => [...prevStrokes, restoredStroke]);
+      return prevUndo.slice(1);
+    });
+    if (onDirtyChange) onDirtyChange(true);
+  }, [onDirtyChange]);
+
+  const handleNewStroke = useCallback((completedStroke) => {
+    setStrokes((prev) => [...prev, completedStroke]);
+    setUndoStack([]); // invalidate redo history on new stroke
+    if (onDirtyChange) onDirtyChange(true);
+  }, [onDirtyChange]);
+
+  // Expose strokes getter for HomePage to use when saving.
+  // Uses a ref to avoid stale closure over the strokes state value.
+  const getStrokes = useCallback(() => latestStrokesRef.current, []);
+
+  // Expose strokes setter for HomePage to use when loading
+  const loadStrokes = useCallback((newStrokes) => {
+    setStrokes(newStrokes || []);
+    setUndoStack([]);
+  }, []);
+
+  // Reactively redraw when strokes change (undo/redo trigger this)
+  useEffect(() => {
+    const ctx = ctxRef.current;
+    if (ctx) {
+      redrawAll(ctx, strokes);
+    }
+  }, [strokes, redrawAll]);
+
+  // Report hasStrokes to parent
+  useEffect(() => {
+    if (onHasStrokesChange) onHasStrokesChange(strokes.length > 0);
+  }, [strokes, onHasStrokesChange]);
+
+  // Expose undo/redo functions to HomePage via callback refs
+  useEffect(() => {
+    if (onUndoReady) onUndoReady(undo);
+  }, [undo, onUndoReady]);
+
+  useEffect(() => {
+    if (onRedoReady) onRedoReady(redo);
+  }, [redo, onRedoReady]);
+
+  // Expose strokes getter/loader to HomePage via callback refs
+  useEffect(() => {
+    if (onGetStrokesReady) onGetStrokesReady(getStrokes);
+  }, [getStrokes, onGetStrokesReady]);
+
+  useEffect(() => {
+    if (onLoadStrokesReady) onLoadStrokesReady(loadStrokes);
+  }, [loadStrokes, onLoadStrokesReady]);
+
+  // Report canUndo / canRedo state to HomePage
+  useEffect(() => {
+    if (onCanUndoChange) onCanUndoChange(strokes.length > 0);
+  }, [strokes, onCanUndoChange]);
+
+  useEffect(() => {
+    if (onCanRedoChange) onCanRedoChange(undoStack.length > 0);
+  }, [undoStack, onCanRedoChange]);
+
   // --- Drawing state transitions ---
 
   const startDrawing = (clientX, clientY) => {
@@ -159,6 +288,15 @@ function DrawingCanvas({
         points: [point],
         eraserSize: eraserSizeRef.current,
       };
+    } else if (shapeModeRef.current) {
+      currentStrokeRef.current = {
+        type: shapeModeRef.current,
+        startPoint: point,
+        endPoint: point,
+        color: colorRef.current,
+        lineWidth: brushSizeRef.current,
+        filled: false,
+      };
     } else {
       currentStrokeRef.current = { points: [point], color: colorRef.current, lineWidth: brushSizeRef.current };
     }
@@ -170,7 +308,13 @@ function DrawingCanvas({
     const ctx = ctxRef.current;
     if (!ctx) return;
 
-    if (eraserModeRef.current) {
+    if (shapeModeRef.current) {
+      // Shape mode: update endPoint, redraw all + preview
+      currentStrokeRef.current.endPoint = point;
+      redrawAll(ctx, strokes);
+      drawShapePreview(ctx, currentStrokeRef.current);
+      lastPointRef.current = point;
+    } else if (eraserModeRef.current) {
       ctx.save();
       ctx.globalCompositeOperation = 'destination-out';
       const radius = (currentStrokeRef.current.eraserSize || 15) / 2;
@@ -178,6 +322,8 @@ function DrawingCanvas({
       ctx.arc(point.x, point.y, radius, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+      lastPointRef.current = point;
+      currentStrokeRef.current.points.push(point);
     } else {
       ctx.strokeStyle = colorRef.current;
       ctx.lineWidth = currentStrokeRef.current.lineWidth || 3;
@@ -185,10 +331,9 @@ function DrawingCanvas({
       ctx.moveTo(lastPointRef.current.x, lastPointRef.current.y);
       ctx.lineTo(point.x, point.y);
       ctx.stroke();
+      lastPointRef.current = point;
+      currentStrokeRef.current.points.push(point);
     }
-
-    lastPointRef.current = point;
-    currentStrokeRef.current.points.push(point);
   };
 
   const endDrawing = () => {
@@ -197,11 +342,15 @@ function DrawingCanvas({
     const completedStroke = currentStrokeRef.current;
     currentStrokeRef.current = null;
     lastPointRef.current = null;
-    if (completedStroke && completedStroke.points.length > 0) {
-      if (completedStroke.type !== 'erase') {
+    if (!completedStroke) return;
+
+    // Shape strokes don't have points array
+    const hasContent = completedStroke.points ? completedStroke.points.length > 0 : true;
+    if (hasContent) {
+      if (completedStroke.type !== 'erase' && !(completedStroke.type === 'rect' || completedStroke.type === 'circle' || completedStroke.type === 'line')) {
         completedStroke.color = colorRef.current;
       }
-      setStrokes((prev) => [...prev, completedStroke]);
+      handleNewStroke(completedStroke);
     }
   };
 

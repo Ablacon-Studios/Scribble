@@ -1,9 +1,12 @@
 import { useRef, useLayoutEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import ColorSwatch from './ColorSwatch';
+import UndoRedoToggle from './UndoRedoToggle';
 import EraserToggle from './EraserToggle';
+import ShapeToolsGroup from './ShapeToolsGroup';
 import BrushSizeSelector from './BrushSizeSelector';
 import EraserSizeSelector from './EraserSizeSelector';
+import ProjectControls from './ProjectControls';
 
 const PRESET_COLORS = [
   { name: 'Black',   hex: '#000000' },
@@ -29,6 +32,21 @@ function ColorToolbar({
   onEraserSizeChange,
   brushSize,
   onBrushSizeChange,
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+  shapeMode,
+  onShapeModeChange,
+  hasActiveProject,
+  isDirty,
+  canSave,
+  isSaving,
+  onProjectNew,
+  onProjectSave,
+  onProjectLoad,
+  onSaveAs,
+  projectName,
 }) {
   const eraserRef = useRef(null);
   const [flyoutPos, setFlyoutPos] = useState({ top: 0, left: 0 });
@@ -46,12 +64,20 @@ function ColorToolbar({
 
   return (
     <div
-      className="sm:w-16 sm:h-full sm:flex-col sm:border-r sm:border-b-0 sm:pt-4
-                 w-full flex-row border-b border-r-0 px-2 py-2 overflow-x-auto overflow-y-hidden
-                 bg-scribble-surface border-scribble-border flex items-center gap-2"
+      className="sm:w-16 sm:h-full sm:flex-col sm:border-r sm:border-b-0 sm:overflow-y-auto sm:min-h-0
+                  w-full flex-row border-b border-r-0 px-2 py-2 overflow-x-auto overflow-y-hidden
+                  bg-scribble-surface border-scribble-border flex items-center gap-1.5 sm:gap-1"
       role="toolbar"
       aria-label="Drawing toolbar"
     >
+      {/* Undo / Redo buttons */}
+      <UndoRedoToggle
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={onUndo}
+        onRedo={onRedo}
+      />
+
       {/* Eraser toggle with flyout — NOT inside overflow area */}
       <div ref={eraserRef} className="sm:relative flex sm:flex-col items-center shrink-0">
         <EraserToggle active={eraserMode} onToggle={onEraserToggle} />
@@ -68,53 +94,79 @@ function ColorToolbar({
         )}
       </div>
 
-      {/* Scrollable content on desktop */}
-      <div className="sm:flex-1 sm:overflow-y-auto sm:w-full flex sm:flex-col items-center gap-1 sm:gap-0">
-        {/* Separator */}
-        <div
-          className="sm:w-full sm:h-px sm:my-1 w-px h-6 mx-1 bg-scribble-border shrink-0"
-          aria-hidden="true"
-        />
+      {/* Shape tools */}
+      <ShapeToolsGroup
+        shapeMode={shapeMode}
+        onShapeModeChange={onShapeModeChange}
+      />
 
-        {/* Color swatches */}
-        <div className="flex sm:flex-col gap-2 flex-wrap sm:flex-nowrap" role="radiogroup" aria-label="Preset colors">
-          {PRESET_COLORS.map((c) => (
-            <ColorSwatch
-              key={c.hex}
-              color={c.hex}
-              name={c.name}
-              isActive={currentColor === c.hex}
-              onSelect={onColorChange}
-            />
-          ))}
-        </div>
+      {/* Separator */}
+      <div
+        className="sm:w-full sm:h-px sm:my-1 w-px h-6 mx-1 bg-scribble-border shrink-0"
+        aria-hidden="true"
+      />
 
-        {/* Brush size selector */}
-        <div
-          className="sm:w-full sm:h-px sm:my-1 w-px h-6 mx-1 bg-scribble-border shrink-0"
-          aria-hidden="true"
-        />
-        <BrushSizeSelector
-          currentSize={brushSize}
-          onChange={onBrushSizeChange}
-        />
+      {/* Project controls (Save / Load / New) */}
+      <ProjectControls
+        hasActiveProject={hasActiveProject}
+        isDirty={isDirty}
+        canSave={canSave}
+        isSaving={isSaving}
+        onProjectNew={onProjectNew}
+        onProjectSave={onProjectSave}
+        onProjectLoad={onProjectLoad}
+        onSaveAs={onSaveAs}
+        projectName={projectName}
+      />
 
-        {/* Custom color picker — pushed to bottom on desktop */}
-        <div className="sm:mt-auto sm:w-full sm:pt-2 sm:border-t sm:border-scribble-border flex sm:flex-col items-center gap-1">
-          <div className="sm:hidden w-px h-6 bg-scribble-border mx-1" aria-hidden="true" />
-          <input
-            type="color"
-            value={currentColor}
-            onChange={(e) => onColorChange(e.target.value)}
-            className="w-7 h-7 sm:w-7 sm:h-7 w-8 h-8 rounded-full cursor-pointer border-0 p-0 bg-transparent
-                       [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-0
-                       hover:scale-110 transition-transform duration-150
-                       focus-visible:ring-2 focus-visible:ring-scribble-primary focus-visible:ring-offset-2 focus-visible:ring-offset-scribble-surface"
-            aria-label="Custom color picker"
-            title="Custom color"
+      {/* Separator */}
+      <div
+        className="sm:w-full sm:h-px sm:my-1 w-px h-6 mx-1 bg-scribble-border shrink-0"
+        aria-hidden="true"
+      />
+
+      {/* Color swatches */}
+      <div
+        className="grid grid-cols-2 gap-1.5"
+        role="radiogroup"
+        aria-label="Preset colors"
+      >
+        {PRESET_COLORS.map((c) => (
+          <ColorSwatch
+            key={c.hex}
+            color={c.hex}
+            name={c.name}
+            isActive={currentColor === c.hex}
+            onSelect={onColorChange}
           />
-          <span className="hidden sm:block text-[10px] text-scribble-muted text-center">Custom</span>
-        </div>
+        ))}
+      </div>
+
+      {/* Brush size selector */}
+      <div
+        className="sm:w-full sm:h-px sm:my-1 w-px h-6 mx-1 bg-scribble-border shrink-0"
+        aria-hidden="true"
+      />
+      <BrushSizeSelector
+        currentSize={brushSize}
+        onChange={onBrushSizeChange}
+      />
+
+      {/* Custom color picker — pushed to bottom on desktop */}
+      <div className="sm:mt-auto sm:w-full sm:pt-2 sm:border-t sm:border-scribble-border flex sm:flex-col items-center gap-1">
+        <div className="sm:hidden w-px h-6 bg-scribble-border mx-1" aria-hidden="true" />
+        <input
+          type="color"
+          value={currentColor}
+          onChange={(e) => onColorChange(e.target.value)}
+          className="w-7 h-7 sm:w-7 sm:h-7 w-8 h-8 rounded-full cursor-pointer border-0 p-0 bg-transparent
+                     [&::-webkit-color-swatch-wrapper]:p-0 [&::-webkit-color-swatch]:rounded-full [&::-webkit-color-swatch]:border-0
+                     hover:scale-110 transition-transform duration-150
+                     focus-visible:ring-2 focus-visible:ring-scribble-primary focus-visible:ring-offset-2 focus-visible:ring-offset-scribble-surface"
+          aria-label="Custom color picker"
+          title="Custom color"
+        />
+        <span className="hidden sm:block text-[10px] text-scribble-muted text-center">Custom</span>
       </div>
     </div>
   );

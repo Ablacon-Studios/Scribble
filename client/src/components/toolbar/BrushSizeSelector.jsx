@@ -10,7 +10,7 @@ function BrushSizeSelector({ currentSize, onChange }) {
     <div
       role="radiogroup"
       aria-label="Brush size"
-      className="flex sm:flex-col gap-1 sm:gap-2 items-center"
+      className="grid grid-cols-2 gap-1.5"
     >
       {SIZE_OPTIONS.map((opt) => {
         const isActive = currentSize === opt.value;

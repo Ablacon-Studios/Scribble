@@ -1,25 +1,25 @@
-import eventlet
-eventlet.monkey_patch()
-
 import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Must load .env before any application imports that use os.getenv
+load_dotenv()
+
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 from flask_socketio import SocketIO  # noqa: F401 – kept for type annotation
-from dotenv import load_dotenv
 
 from config import Config
 from extensions import db, socketio, limiter
 from auth import auth_bp
 from models import VerificationToken
+from projects import projects_bp
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-load_dotenv()
 
 
 def create_app() -> tuple[Flask, SocketIO]:
@@ -46,6 +46,8 @@ def create_app() -> tuple[Flask, SocketIO]:
 
     # -- Configuration -----------------------------------------------------
     app.config.from_object(Config)
+    # Defense-in-depth against oversized drawing payloads (6 MB > 5 MB strokes limit)
+    app.config["MAX_CONTENT_LENGTH"] = 6 * 1024 * 1024
 
     if app.config["SECRET_KEY"] == "dev-secret-change-in-production" and env != "development":
         logger.warning("SECRET_KEY is using the default value. Set it in production!")
@@ -59,7 +61,7 @@ def create_app() -> tuple[Flask, SocketIO]:
         if not is_production
         else []
     )
-    socketio.init_app(app, cors_allowed_origins=cors_allowed, async_mode="eventlet")
+    socketio.init_app(app, cors_allowed_origins=cors_allowed, async_mode="threading")
 
     # -- Database ----------------------------------------------------------
     instance_dir = os.path.join(os.path.dirname(__file__), "instance")
@@ -78,6 +80,7 @@ def create_app() -> tuple[Flask, SocketIO]:
 
     # -- Blueprints --------------------------------------------------------
     app.register_blueprint(auth_bp)
+    app.register_blueprint(projects_bp)
 
     # --- API Routes (placeholder for future features) ---
     @app.route("/api/health")
@@ -195,5 +198,14 @@ if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "0") == "1"
     host = os.getenv("FLASK_HOST", "127.0.0.1")
     env = os.getenv("FLASK_ENV", "production")
-    logger.info("Starting Scribble server on http://%s:%s (mode: %s)", host, port, env)
-    socketio.run(app, host=host, port=port, debug=debug)
+    logger.info(
+        "Starting Scribble server on http://%s:%s (mode: %s, async: threading)",
+        host, port, env,
+    )
+    socketio.run(
+        app,
+        host=host,
+        port=port,
+        debug=debug,
+        allow_unsafe_werkzeug=True,
+    )

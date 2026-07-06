@@ -1,54 +1,70 @@
 # Next Session Handoff
 
-## Current Feature
-**Eraser Tool & Brush Sizes (Feature #5)** — **NOT APPROVED YET**
-The human has NOT approved this feature. They are still testing it.
+## Current Issue
+**Toolbar extends off the bottom of the screen** — NOT FIXED.
 
-## What Was Built
-- Eraser tool with toggle button, 3 size presets (5/15/30px), true pixel erasure via `destination-out`
-- Brush size selector with 4 presets: Thin (1/3/5/8px), stored per-stroke, replayed on redraw
-- Eraser cursor overlay: purple ring with center crosshair dot, tracks mouse always (even in pencil mode for instant appearance)
-- Eraser size flyout: uses React Portal to `document.body` with `position: fixed`, appears to right of toggle on desktop
-- Redraw fix: strokes replayed in chronological order (interleaved) instead of two-pass — fixes "can't draw over erased regions" bug
+The left sidebar toolbar (colors, tools, project controls) has too much vertical content for the available screen height. The user wants it to "wrap in a way that is usable" and be "dynamic, adjusting to screen size."
 
-## Human's Feedback (resolved)
-- "Cannot tell where eraser is" → Fixed: added purple cursor overlay with center dot
-- "Cannot draw over erased regions" → Fixed: changed redrawAll from two-pass to interleaved chronological order
-- "Make erase menu expand to the right" → Fixed: flyout appears to the right via portal
-- "Pop erase menu doesn't work" → Fixed: removed overflow clipping, then switched to React Portal
-- "Rebuild after changes" → Build command: `cd client && npm run build`
+## What Was Tried (all failed to fully resolve)
+1. Color swatches changed to 2-column grid (`grid-cols-2`) — helped but didn't solve
+2. Brush sizes changed to 2×2 grid — helped but didn't solve
+3. Auto-fill CSS grid (`repeat(auto-fill, minmax(...))`) — user said this made things worse
+4. Changed toolbar `overflow-y-hidden` to `sm:overflow-y-auto` + added `sm:min-h-0` — scrolling should work but user reports it still doesn't
+5. Removed nested scrollable wrapper, made toolbar itself scrollable
 
-## Files Created
-- `client/src/components/toolbar/EraserToggle.jsx`
-- `client/src/components/toolbar/EraserSizeSelector.jsx`
-- `client/src/components/toolbar/BrushSizeSelector.jsx`
-- `client/src/components/toolbar/__tests__/EraserToggle.test.jsx`
-- `client/src/components/toolbar/__tests__/EraserSizeSelector.test.jsx`
-- `client/src/components/toolbar/__tests__/BrushSizeSelector.test.jsx`
-- `docs/specs/eraser-tool.md`
-- `docs/design/eraser-tool.md`
+## Current State of ColorToolbar.jsx
+- Toolbar: `sm:w-16 sm:h-full sm:flex-col sm:overflow-y-auto sm:min-h-0`
+- Color swatches: `grid grid-cols-2 gap-1.5` (12 swatches, 24px each)
+- Brush sizes: `grid grid-cols-2 gap-1.5` (4 sizes)
+- ProjectControls: 4 stacked buttons (Save, Save As, Load, New)
+- ShapeToolsGroup: 3 stacked buttons
+- Undo/Redo + Eraser: at top, outside any scroll area
 
-## Files Modified
-- `client/src/components/toolbar/ColorToolbar.jsx` — restructured for portal flyout
-- `client/src/components/HomePage.jsx` — eraser + brush state/refs
-- `client/src/components/canvas/DrawingCanvas.jsx` — eraser drawing, brush sizes, cursor overlay, interleaved redraw
-- `client/src/components/canvas/__tests__/DrawingCanvas.test.jsx` — 11 new tests
-- `client/src/components/__tests__/HomePage.test.jsx` — 9 new tests
+## Layout Chain (likely where the bug lives)
+```
+HomePage: flex flex-1 overflow-hidden
+  └─ ColorToolbar: sm:h-full sm:min-h-0 sm:overflow-y-auto sm:flex-col
+       ├─ UndoRedoToggle (shrink-0)
+       ├─ EraserToggle (shrink-0)
+       ├─ ShapeToolsGroup
+       ├─ ProjectControls (4 buttons)
+       ├─ 12 color swatches (2-col grid)
+       ├─ BrushSizeSelector (2x2 grid)
+       └─ Custom color picker (sm:mt-auto)
+```
+
+## Possible Root Causes to Investigate
+- The `sm:h-full` may not be constrained because the parent flex row isn't providing a definite height
+- `sm:min-h-0` might not be enough — the parent chain (HomePage's `flex-1 overflow-hidden`) may need `min-h-0` too
+- Browser-specific flexbox behavior with `overflow-y-auto` on deeply nested flex children
+- The `sm:mt-auto` on the custom picker might interfere with the scroll container
+- The toolbar might need explicit `max-height` instead of relying on flex constraints
+
+## Suggested Approach for Next Session
+1. Start by reading `client/src/components/HomePage.jsx` (the parent layout) and `ColorToolbar.jsx`
+2. Try adding `min-h-0` to the HomePage flex container (`<div className="flex flex-1 overflow-hidden">`)
+3. Try giving ColorToolbar explicit `max-height: 100vh` or `max-height: 100%` instead of relying on `h-full`
+4. Consider a completely different approach: make sections collapsible, or move some tools to a top navbar
+5. As a last resort, reduce toolbar content further (fewer swatches, combine tools)
+
+## Completed Features (8 total)
+1. ✅ Serve Web + Electron App from Server
+2. ✅ User Authentication & Profile System
+3. ✅ Drawing Canvas — Single Color Drawing
+4. ✅ Multiple Colors & Color Picker
+5. ✅ Eraser Tool & Brush Sizes
+6. ✅ Undo/Redo
+7. ✅ Shape Tools
+8. ✅ Project Saving & Loading
 
 ## Test Status
-- 161 frontend tests (Jest) — all passing
-- 102 backend tests (pytest) — all passing
-- Total: 263/263
+- 439 tests total — all passing (146 backend + 293 frontend)
 
-## Build
-- `cd client && npm run build` — compiles cleanly, no raw @tailwind directives
+## Server
+- Production mode: `cd server && python3 app.py` → http://localhost:5000
+- .env exists with FLASK_ENV=production
+- Async mode: threading (eventlet removed for Python 3.12+ compat)
 
-## What To Do Next
-- Present the feature to the human for approval
-- If revisions requested, fix and rebuild
-- If approved, move to next feature
-- **IMPORTANT: Always run `npm run build` after any code change.** The human explicitly requested this.
-
-## Login Credentials for Testing
-- Username: `demo`
-- Password: `demo1234`
+## Login for Testing
+- Username: `test2`
+- Password: `test1234`

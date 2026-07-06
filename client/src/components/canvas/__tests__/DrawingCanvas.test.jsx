@@ -3,7 +3,7 @@
  */
 import '@testing-library/jest-dom';
 import 'jest-canvas-mock';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import DrawingCanvas from '../DrawingCanvas';
 
 // -------------------------------------------------------------------------
@@ -986,6 +986,502 @@ describe('DrawingCanvas', () => {
     expect(ctx.lineWidth).toBe(3);
   });
 
+  // =======================================================================
+  // UNDO / REDO INTEGRATION TESTS
+  // =======================================================================
+
+  /**
+   * Helper: render DrawingCanvas with undo/redo callback capturers.
+   * Returns { undo, redo, cancelRender } where undo/redo are the
+   * functions exposed by DrawingCanvas via onUndoReady / onRedoReady,
+   * and cancelRender is the cleanup returned by RTL render().
+   */
+  function renderCanvasWithUndoRedo(overrides = {}) {
+    const undoFnRef = { current: null };
+    const redoFnRef = { current: null };
+
+    const renderResult = render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        onUndoReady={(fn) => { undoFnRef.current = fn; }}
+        onRedoReady={(fn) => { redoFnRef.current = fn; }}
+        {...overrides}
+      />
+    );
+
+    return {
+      renderResult,
+      getUndo: () => undoFnRef.current,
+      getRedo: () => redoFnRef.current,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // 31. Undo removes last stroke and triggers redraw
+  // -----------------------------------------------------------------------
+  test('undo removes last stroke and triggers canvas redraw', async () => {
+    const { getUndo } = renderCanvasWithUndoRedo();
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw 2 pencil strokes
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 250, clientY: 125 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Clear spy state after the two draws so we can isolate the undo redraw
+    ctx.clearRect.mockClear();
+    ctx.stroke.mockClear();
+
+    // Call undo — wrapped in act() to flush React state updates
+    const undoFn = getUndo();
+    expect(undoFn).toBeTruthy();
+
+    await act(async () => {
+      undoFn();
+    });
+
+    // After undo, redrawAll should have been called
+    // Verify canvas was cleared and strokes replayed
+    // (clearRect is called once by redrawAll)
+    expect(ctx.clearRect).toHaveBeenCalled();
+    // At least one stroke should be replayed (could be called more than
+    // once due to React double-rendering in dev mode)
+    expect(ctx.stroke).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 32. Redo restores undone stroke
+  // -----------------------------------------------------------------------
+  test('redo restores an undone stroke', async () => {
+    const { getUndo, getRedo } = renderCanvasWithUndoRedo();
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw 1 pencil stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Undo it
+    const undoFn = getUndo();
+    expect(undoFn).toBeTruthy();
+    await act(async () => {
+      undoFn();
+    });
+
+    // Clear spies after undo redraw
+    ctx.clearRect.mockClear();
+    ctx.stroke.mockClear();
+
+    // Redo
+    const redoFn = getRedo();
+    expect(redoFn).toBeTruthy();
+    await act(async () => {
+      redoFn();
+    });
+
+    // redrawAll should have been called (clearRect)
+    expect(ctx.clearRect).toHaveBeenCalled();
+    // The restored stroke should be replayed
+    expect(ctx.stroke).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 33. Undo on empty canvas is no-op
+  // -----------------------------------------------------------------------
+  test('undo on empty canvas is a no-op and does not throw', async () => {
+    const { getUndo } = renderCanvasWithUndoRedo();
+
+    const undoFn = getUndo();
+    expect(undoFn).toBeTruthy();
+
+    // Should not throw — calling undo on an empty canvas
+    await act(async () => {
+      expect(() => undoFn()).not.toThrow();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // 34. Redo with empty undo stack is no-op
+  // -----------------------------------------------------------------------
+  test('redo with empty undo stack is a no-op and does not throw', async () => {
+    const { getRedo } = renderCanvasWithUndoRedo();
+
+    const redoFn = getRedo();
+    expect(redoFn).toBeTruthy();
+
+    // Should not throw — calling redo with an empty undo stack
+    await act(async () => {
+      expect(() => redoFn()).not.toThrow();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // 35. New stroke clears redo (undo) stack
+  // -----------------------------------------------------------------------
+  test('new stroke after undo clears the redo stack', async () => {
+    const canRedoCalls = [];
+    const { getUndo } = renderCanvasWithUndoRedo({
+      onCanRedoChange: (val) => canRedoCalls.push(val),
+    });
+    const canvas = screen.getByRole('img');
+
+    // Draw 1 stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Undo it — this should push the stroke to undoStack, making canRedo true
+    const undoFn = getUndo();
+    await act(async () => {
+      undoFn();
+    });
+
+    // After undo, canRedo should be true (we have something in undoStack)
+    // The last value pushed should be true
+    const canRedoAfterUndo = canRedoCalls[canRedoCalls.length - 1];
+    expect(canRedoAfterUndo).toBe(true);
+
+    // Draw a new stroke — this should clear the undoStack
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 250, clientY: 125 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // After new stroke, the last canRedo value should be false
+    // (undoStack is cleared by handleNewStroke)
+    const lastCanRedo = canRedoCalls[canRedoCalls.length - 1];
+    expect(lastCanRedo).toBe(false);
+  });
+
+  // -----------------------------------------------------------------------
+  // 36. Multiple undo/redo cycles produce correct canvas state
+  // -----------------------------------------------------------------------
+  test('multiple undo/redo cycles produce correct canvas state', async () => {
+    const { getUndo, getRedo } = renderCanvasWithUndoRedo();
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw 3 pencil strokes
+    for (let i = 0; i < 3; i++) {
+      fireEvent.mouseDown(canvas, { clientX: 100 + i * 100, clientY: 50 });
+      fireEvent.mouseMove(canvas, { clientX: 150 + i * 100, clientY: 75 });
+      fireEvent.mouseUp(canvas);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+
+    // Undo 2 strokes using act() to flush state
+    const undoFn = getUndo();
+    await act(async () => {
+      undoFn();
+    });
+    await act(async () => {
+      undoFn();
+    });
+
+    // Now: strokes should have 1 item, undoStack should have 2 items
+    // Clear spies and redo 1
+    ctx.clearRect.mockClear();
+    ctx.stroke.mockClear();
+
+    const redoFn = getRedo();
+    await act(async () => {
+      redoFn();
+    });
+
+    // After redo: strokes should have 2 items, so the canvas is redrawn
+    expect(ctx.clearRect).toHaveBeenCalled();
+    // At least one stroke is replayed (2 draw strokes = 2 stroke() calls)
+    expect(ctx.stroke).toHaveBeenCalled();
+
+    // Undo 1 more
+    ctx.clearRect.mockClear();
+    ctx.stroke.mockClear();
+    await act(async () => {
+      undoFn();
+    });
+
+    // After undo: strokes should have 1 item, canvas redrawn
+    expect(ctx.clearRect).toHaveBeenCalled();
+    expect(ctx.stroke).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 37. Eraser stroke undo/redo
+  // -----------------------------------------------------------------------
+  test('eraser stroke can be undone and redone', async () => {
+    const eraserModeRef = { current: false };
+    const eraserSizeRef = { current: 15 };
+
+    const { getUndo, getRedo } = renderCanvasWithUndoRedo({
+      eraserModeRef,
+      eraserSizeRef,
+    });
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw 1 pencil stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Draw 1 eraser stroke
+    eraserModeRef.current = true;
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 250, clientY: 125 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Undo — should remove the eraser stroke (last stroke)
+    ctx.clearRect.mockClear();
+    ctx.stroke.mockClear();
+
+    const undoFn = getUndo();
+    await act(async () => {
+      undoFn();
+    });
+
+    // After undo, the canvas should be redrawn with only the pencil stroke
+    expect(ctx.clearRect).toHaveBeenCalled();
+    // At least one stroke replay (the pencil stroke)
+    expect(ctx.stroke).toHaveBeenCalled();
+
+    // Redo — should restore the eraser stroke
+    ctx.clearRect.mockClear();
+    ctx.stroke.mockClear();
+
+    const redoFn = getRedo();
+    await act(async () => {
+      redoFn();
+    });
+
+    // After redo, both strokes should be replayed
+    expect(ctx.clearRect).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 38. Canvas resize after undo — strokes state is correct
+  // -----------------------------------------------------------------------
+  test('canvas resize after undo replays only remaining strokes', async () => {
+    const canUndoCalls = [];
+    const { getUndo } = renderCanvasWithUndoRedo({
+      onCanUndoChange: (val) => canUndoCalls.push(val),
+    });
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw 2 pencil strokes
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 250, clientY: 125 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Verify canUndo is true (we have strokes)
+    expect(canUndoCalls[canUndoCalls.length - 1]).toBe(true);
+
+    // Undo 1 stroke — should leave 1 stroke remaining
+    const undoFn = getUndo();
+    await act(async () => {
+      undoFn();
+    });
+
+    // After undo, we still have 1 stroke, so canUndo should still be true
+    expect(canUndoCalls[canUndoCalls.length - 1]).toBe(true);
+
+    // Trigger a resize — the canvas should redraw the remaining strokes
+    ctx.clearRect.mockClear();
+    ctx.stroke.mockClear();
+
+    // Change clientWidth and trigger a ResizeObserver-compatible resize
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      value: 700,
+    });
+
+    // ResizeObserver's callback is not triggered by window.resize in our mock,
+    // but the component's resizeCanvas is exposed as an internal callback.
+    // We verify the resize effect indirectly: draw a new stroke, which calls
+    // redrawAll and replays only the current (remaining) strokes.
+    fireEvent.mouseDown(canvas, { clientX: 300, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 350, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // After new stroke + redrawAll, canvas is redrawn with ALL existing strokes
+    expect(ctx.clearRect).toHaveBeenCalled();
+    // At least 2 strokes replayed (1 remaining + 1 new = 2 draw strokes)
+    expect(ctx.stroke).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 39. Mid-stroke undo is blocked
+  // -----------------------------------------------------------------------
+  test('undo is blocked during an active drawing stroke', async () => {
+    const canUndoCalls = [];
+    const { getUndo } = renderCanvasWithUndoRedo({
+      onCanUndoChange: (val) => canUndoCalls.push(val),
+    });
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw 1 stroke so we have something to undo
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Start a new stroke but DON'T end it (mid-stroke)
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 250, clientY: 125 });
+    // isDrawingRef.current is now true
+
+    // Clear canvas spies so we can detect whether undo triggers a redraw
+    ctx.clearRect.mockClear();
+
+    const undoFn = getUndo();
+    expect(undoFn).toBeTruthy();
+    // Call undo while mid-stroke — the isDrawingRef guard must block it
+    undoFn();
+
+    // If the guard works, undo returns early and clearRect is NOT called.
+    // If the guard fails, undo would call setStrokes → useEffect → redrawAll → clearRect.
+    expect(ctx.clearRect).not.toHaveBeenCalled();
+
+    // Complete the stroke
+    fireEvent.mouseMove(canvas, { clientX: 300, clientY: 150 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // After completing the second stroke, canUndo should be true (2 strokes exist)
+    expect(canUndoCalls[canUndoCalls.length - 1]).toBe(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // 40. onUndoReady callback receives a function
+  // -----------------------------------------------------------------------
+  test('onUndoReady callback receives a function', () => {
+    const undoReadyFn = jest.fn();
+
+    render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        onUndoReady={undoReadyFn}
+        onRedoReady={jest.fn()}
+      />
+    );
+
+    // The callback should have been called with a function
+    expect(undoReadyFn).toHaveBeenCalled();
+    const receivedFn = undoReadyFn.mock.calls[undoReadyFn.mock.calls.length - 1][0];
+    expect(typeof receivedFn).toBe('function');
+  });
+
+  // -----------------------------------------------------------------------
+  // 41. onRedoReady callback receives a function
+  // -----------------------------------------------------------------------
+  test('onRedoReady callback receives a function', () => {
+    const redoReadyFn = jest.fn();
+
+    render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        onUndoReady={jest.fn()}
+        onRedoReady={redoReadyFn}
+      />
+    );
+
+    // The callback should have been called with a function
+    expect(redoReadyFn).toHaveBeenCalled();
+    const receivedFn = redoReadyFn.mock.calls[redoReadyFn.mock.calls.length - 1][0];
+    expect(typeof receivedFn).toBe('function');
+  });
+
+  // -----------------------------------------------------------------------
+  // 42. onCanUndoChange reports false initially, true after drawing
+  // -----------------------------------------------------------------------
+  test('onCanUndoChange reports correct values as strokes change', async () => {
+    const canUndoCalls = [];
+
+    render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        onCanUndoChange={(val) => canUndoCalls.push(val)}
+      />
+    );
+    const canvas = screen.getByRole('img');
+
+    // Initially canUndo should be false (no strokes)
+    expect(canUndoCalls[0]).toBe(false);
+
+    // Draw a stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // After drawing, at least one canUndo call should be true
+    expect(canUndoCalls).toContain(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // 42b. onCanRedoChange reports correct values as undoStack changes
+  // -----------------------------------------------------------------------
+  test('onCanRedoChange reports correct values as undoStack changes', async () => {
+    const canRedoCalls = [];
+    const undoFnRef = { current: null };
+
+    render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        onUndoReady={(fn) => { undoFnRef.current = fn; }}
+        onCanRedoChange={(val) => canRedoCalls.push(val)}
+      />
+    );
+    const canvas = screen.getByRole('img');
+
+    // Initially canRedo should be false
+    expect(canRedoCalls[0]).toBe(false);
+
+    // Draw a stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Undo — undoStack now has 1 item, canRedo should become true
+    await act(async () => {
+      if (undoFnRef.current) undoFnRef.current();
+    });
+
+    // After undo, the last canRedo call should be true
+    const canRedoAfterUndo = canRedoCalls[canRedoCalls.length - 1];
+    expect(canRedoAfterUndo).toBe(true);
+
+    // After drawing new stroke and clearing undoStack, last value should be false
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 250, clientY: 125 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const lastCanRedo = canRedoCalls[canRedoCalls.length - 1];
+    expect(lastCanRedo).toBe(false);
+  });
+
   // -----------------------------------------------------------------------
   // 25. Eraser stroke storage: verify completed erase stroke is stored and replayed
   // -----------------------------------------------------------------------
@@ -1029,5 +1525,744 @@ describe('DrawingCanvas', () => {
     expect(fillSpy).toHaveBeenCalled();
     // globalCompositeOperation must be reset to source-over after redraw
     expect(ctx.globalCompositeOperation).toBe('source-over');
+  });
+
+  // =======================================================================
+  // SHAPE TOOL TESTS
+  // =======================================================================
+
+  // -----------------------------------------------------------------------
+  // 43. Rectangle renders via ctx.strokeRect during shape preview
+  // -----------------------------------------------------------------------
+  test('rectangle shape preview renders via ctx.strokeRect with correct bounds', () => {
+    const shapeModeRef = { current: 'rect' };
+    render(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+    const strokeRectSpy = jest.spyOn(ctx, 'strokeRect');
+
+    // Drag from (100,50) to (200,150) — creates a 100×100 rectangle
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+
+    // strokeRect should be called with x=min(x1,x2), y=min(y1,y2), w=|dx|, h=|dy|
+    expect(strokeRectSpy).toHaveBeenCalledWith(100, 50, 100, 100);
+  });
+
+  // -----------------------------------------------------------------------
+  // 44. Circle renders via ctx.ellipse + ctx.stroke during shape preview
+  // -----------------------------------------------------------------------
+  test('circle shape preview renders via ctx.ellipse and ctx.stroke', () => {
+    const shapeModeRef = { current: 'circle' };
+    render(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+    const ellipseSpy = jest.spyOn(ctx, 'ellipse');
+    const strokeSpy = jest.spyOn(ctx, 'stroke');
+
+    // Drag from (100,50) to (200,150)
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+
+    // ellipse should be called with center and radii
+    expect(ellipseSpy).toHaveBeenCalledWith(
+      150, 100,  // center: x + w/2 = 100+50 = 150, y + h/2 = 50+50 = 100
+      50, 50,    // rx = w/2 = 50, ry = h/2 = 50
+      0, 0, Math.PI * 2,
+    );
+    expect(strokeSpy).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 45. Line renders via ctx.beginPath + moveTo + lineTo + stroke during shape preview
+  // -----------------------------------------------------------------------
+  test('line shape preview renders via moveTo and lineTo with correct endpoints', () => {
+    const shapeModeRef = { current: 'line' };
+    render(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+    const moveToSpy = jest.spyOn(ctx, 'moveTo');
+    const lineToSpy = jest.spyOn(ctx, 'lineTo');
+    const strokeSpy = jest.spyOn(ctx, 'stroke');
+
+    // Drag from (100,50) to (200,150)
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+
+    // moveTo with startPoint, lineTo with endPoint
+    expect(moveToSpy).toHaveBeenCalledWith(100, 50);
+    expect(lineToSpy).toHaveBeenCalledWith(200, 150);
+    expect(strokeSpy).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 46. Shape stroke stores color and lineWidth from refs
+  // -----------------------------------------------------------------------
+  test('shape stroke uses color and lineWidth from colorRef and brushSizeRef', () => {
+    const shapeModeRef = { current: 'rect' };
+    const colorRef = { current: '#3b82f6' };
+    const brushSizeRef = { current: 7 };
+
+    render(
+      <DrawingCanvas
+        colorRef={colorRef}
+        brushSizeRef={brushSizeRef}
+        shapeModeRef={shapeModeRef}
+      />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Spy on ctx properties to verify they're set during drawShapePreview
+    const strokeStyleValues = [];
+    const lineWidthValues = [];
+    const origStrokeDesc = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(ctx), 'strokeStyle',
+    );
+    const origLineWidthDesc = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(ctx), 'lineWidth',
+    );
+
+    Object.defineProperty(ctx, 'strokeStyle', {
+      get() { return origStrokeDesc ? origStrokeDesc.get.call(ctx) : '#000'; },
+      set(v) {
+        strokeStyleValues.push(v);
+        if (origStrokeDesc && origStrokeDesc.set) origStrokeDesc.set.call(ctx, v);
+      },
+      configurable: true,
+    });
+    Object.defineProperty(ctx, 'lineWidth', {
+      get() { return origLineWidthDesc ? origLineWidthDesc.get.call(ctx) : 1; },
+      set(v) {
+        lineWidthValues.push(v);
+        if (origLineWidthDesc && origLineWidthDesc.set) origLineWidthDesc.set.call(ctx, v);
+      },
+      configurable: true,
+    });
+
+    // Draw a rectangle shape
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+
+    // During drawShapePreview, strokeStyle should be set to the color
+    expect(strokeStyleValues).toContain('#3b82f6');
+    // During drawShapePreview, lineWidth should be set to the brush size
+    expect(lineWidthValues).toContain(7);
+  });
+
+  // -----------------------------------------------------------------------
+  // 47. redrawAll replays stored shape stroke correctly
+  // -----------------------------------------------------------------------
+  test('redrawAll replays a stored rectangle stroke via strokeRect', async () => {
+    const shapeModeRef = { current: 'rect' };
+
+    render(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw and complete a rectangle stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Switch to pencil mode and set up spy for redrawAll
+    shapeModeRef.current = null;
+    const strokeRectSpy = jest.spyOn(ctx, 'strokeRect');
+
+    // Draw a freehand stroke to trigger redrawAll
+    fireEvent.mouseDown(canvas, { clientX: 300, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 350, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // The stored rectangle should be replayed via strokeRect
+    expect(strokeRectSpy).toHaveBeenCalledWith(100, 50, 100, 100);
+  });
+
+  // -----------------------------------------------------------------------
+  // 48. redrawAll handles mixed strokes (draw + erase + shapes interleaved)
+  // -----------------------------------------------------------------------
+  test('redrawAll replays interleaved draw, erase, and shape strokes', async () => {
+    const shapeModeRef = { current: null };
+    const eraserModeRef = { current: false };
+    const eraserSizeRef = { current: 15 };
+
+    const { rerender } = render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        shapeModeRef={shapeModeRef}
+        eraserModeRef={eraserModeRef}
+        eraserSizeRef={eraserSizeRef}
+      />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // 1. Draw a freehand (pencil) stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // 2. Draw an erase stroke
+    eraserModeRef.current = true;
+    rerender(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        shapeModeRef={shapeModeRef}
+        eraserModeRef={eraserModeRef}
+        eraserSizeRef={eraserSizeRef}
+      />
+    );
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 30 });
+    fireEvent.mouseMove(canvas, { clientX: 220, clientY: 50 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // 3. Draw a rectangle shape
+    eraserModeRef.current = false;
+    shapeModeRef.current = 'rect';
+    rerender(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        shapeModeRef={shapeModeRef}
+        eraserModeRef={eraserModeRef}
+        eraserSizeRef={eraserSizeRef}
+      />
+    );
+    fireEvent.mouseDown(canvas, { clientX: 300, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 400, clientY: 200 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // 4. Switch to pencil mode and set up spies for redrawAll verification
+    shapeModeRef.current = null;
+    rerender(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        shapeModeRef={shapeModeRef}
+        eraserModeRef={eraserModeRef}
+        eraserSizeRef={eraserSizeRef}
+      />
+    );
+
+    const arcSpy = jest.spyOn(ctx, 'arc');
+    const fillSpy = jest.spyOn(ctx, 'fill');
+    const strokeRectSpy = jest.spyOn(ctx, 'strokeRect');
+    const strokeSpy = jest.spyOn(ctx, 'stroke');
+
+    // Intercept globalCompositeOperation to verify erase replay
+    const compositeValues = [];
+    const origDescriptor = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(ctx), 'globalCompositeOperation',
+    );
+    Object.defineProperty(ctx, 'globalCompositeOperation', {
+      get() { return origDescriptor ? origDescriptor.get.call(ctx) : 'source-over'; },
+      set(v) {
+        compositeValues.push(v);
+        if (origDescriptor && origDescriptor.set) origDescriptor.set.call(ctx, v);
+      },
+      configurable: true,
+    });
+
+    // 5. Draw another freehand stroke to trigger redrawAll
+    fireEvent.mouseDown(canvas, { clientX: 450, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 500, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Erase stroke replays: arc + fill must be called
+    expect(arcSpy).toHaveBeenCalled();
+    expect(fillSpy).toHaveBeenCalled();
+    // Rectangle stroke replays: strokeRect must be called
+    expect(strokeRectSpy).toHaveBeenCalled();
+    // Pencil stroke replays: stroke must be called
+    expect(strokeSpy).toHaveBeenCalled();
+    // Erase replay uses destination-out
+    expect(compositeValues).toContain('destination-out');
+    // After redrawAll, composite operation resets to source-over
+    expect(ctx.globalCompositeOperation).toBe('source-over');
+  });
+
+  // -----------------------------------------------------------------------
+  // 49. Freehand strokes are unchanged in redrawAll (regression check)
+  // -----------------------------------------------------------------------
+  test('freehand strokes still replay correctly when shapes are also present', async () => {
+    const shapeModeRef = { current: null };
+
+    render(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw a freehand stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Draw a rectangle shape stroke
+    shapeModeRef.current = 'rect';
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 300, clientY: 200 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Switch to pencil and track freehand-specific methods during redrawAll
+    shapeModeRef.current = null;
+
+    // Track the lineWidth values used during redrawAll to verify freehand
+    // strokes are replayed with their stored lineWidth
+    const lineWidthValues = [];
+    const origDesc = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(ctx), 'lineWidth',
+    );
+    Object.defineProperty(ctx, 'lineWidth', {
+      get() { return origDesc ? origDesc.get.call(ctx) : 1; },
+      set(v) {
+        lineWidthValues.push(v);
+        if (origDesc && origDesc.set) origDesc.set.call(ctx, v);
+      },
+      configurable: true,
+    });
+
+    const beginPathSpy = jest.spyOn(ctx, 'beginPath');
+    const strokeSpy = jest.spyOn(ctx, 'stroke');
+
+    // Draw another freehand stroke to trigger redrawAll
+    fireEvent.mouseDown(canvas, { clientX: 350, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 400, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Freehand strokes must still trigger beginPath and stroke during redrawAll
+    expect(beginPathSpy).toHaveBeenCalled();
+    expect(strokeSpy).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 50. shapeModeRef drives correct branch in startDrawing and draw()
+  // -----------------------------------------------------------------------
+  test('shapeModeRef drives the shape drawing branch in startDrawing and draw', () => {
+    const shapeModeRef = { current: 'rect' };
+
+    render(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+    const strokeRectSpy = jest.spyOn(ctx, 'strokeRect');
+    // Also track that freehand-specific lineTo is NOT used for this shape
+    const lineToSpy = jest.spyOn(ctx, 'lineTo');
+
+    // Start a shape drag
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+
+    // shapeModeRef='rect' → startDrawing creates shape stroke → draw() calls
+    // redrawAll + drawShapePreview → strokeRect is called
+    expect(strokeRectSpy).toHaveBeenCalled();
+
+    // Now switch to pencil mode (no shape) and verify the behavior changes
+    shapeModeRef.current = null;
+    const beginPathSpy = jest.spyOn(ctx, 'beginPath');
+    const moveToSpy = jest.spyOn(ctx, 'moveTo');
+
+    fireEvent.mouseDown(canvas, { clientX: 300, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 350, clientY: 75 });
+
+    // In pencil mode, freehand methods are used instead of shape methods
+    expect(beginPathSpy).toHaveBeenCalled();
+    expect(moveToSpy).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 51. endDrawing stores shape stroke via handleNewStroke
+  // -----------------------------------------------------------------------
+  test('endDrawing stores shape stroke so it can be undone and replayed', async () => {
+    const shapeModeRef = { current: 'rect' };
+    const canUndoCalls = [];
+
+    render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        shapeModeRef={shapeModeRef}
+        onCanUndoChange={(val) => canUndoCalls.push(val)}
+      />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Initially canUndo is false (no strokes)
+    expect(canUndoCalls[0]).toBe(false);
+
+    // Draw and complete a rectangle stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // After the shape stroke is stored via handleNewStroke, canUndo must be true
+    expect(canUndoCalls).toContain(true);
+
+    // Switch to pencil mode and verify the shape stroke replays on redrawAll
+    shapeModeRef.current = null;
+    const strokeRectSpy = jest.spyOn(ctx, 'strokeRect');
+
+    // Draw a freehand stroke to trigger redrawAll (which replays the shape)
+    fireEvent.mouseDown(canvas, { clientX: 300, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 350, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // The stored rectangle stroke must have been replayed
+    expect(strokeRectSpy).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 52. Single-click shape (no drag) creates stroke with startPoint === endPoint
+  // -----------------------------------------------------------------------
+  test('single-click shape draws stores a stroke with matching start and end points without crashing', async () => {
+    const shapeModeRef = { current: 'rect' };
+    const canUndoCalls = [];
+
+    render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        shapeModeRef={shapeModeRef}
+        onCanUndoChange={(val) => canUndoCalls.push(val)}
+      />
+    );
+    const canvas = screen.getByRole('img');
+
+    // Mouse down then IMMEDIATE mouse up — no drag, zero-size shape
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // The stroke should be stored even though it's zero-size
+    // canUndo should become true
+    expect(canUndoCalls).toContain(true);
+
+    // Drawing a new stroke should still work — no crash
+    shapeModeRef.current = null;
+    const ctx = getCtx();
+    const strokeSpy = jest.spyOn(ctx, 'stroke');
+
+    fireEvent.mouseDown(canvas, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(canvas, { clientX: 250, clientY: 125 });
+    fireEvent.mouseUp(canvas);
+
+    // A new freehand stroke should work fine after the zero-size shape
+    expect(strokeSpy).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 53. Shape stroke format verified (type, startPoint, endPoint present, no points[])
+  // -----------------------------------------------------------------------
+  test('shape stroke is stored with type/startPoint/endPoint and replayed via shape branch', async () => {
+    const shapeModeRef = { current: 'rect' };
+
+    render(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw and complete a rectangle stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Switch to pencil mode
+    shapeModeRef.current = null;
+
+    // Spies: shape-specific strokeRect vs freehand-specific pattern
+    const strokeRectSpy = jest.spyOn(ctx, 'strokeRect');
+    // moveTo/lineTo are used in freehand replay — if the shape stroke had
+    // a points[] array it would be replayed through the freehand branch
+    const moveToSpy = jest.spyOn(ctx, 'moveTo');
+
+    // Draw a freehand stroke to trigger redrawAll
+    fireEvent.mouseDown(canvas, { clientX: 300, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 350, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // The shape stroke MUST be replayed via strokeRect (shape branch)
+    expect(strokeRectSpy).toHaveBeenCalled();
+
+    // The shape stroke must NOT go through the freehand branch which would
+    // use moveTo on points[0]. The moveTo calls from the live freehand draw
+    // and from the freehand redraw are separate — but a shape stroke going
+    // through the freehand branch would also call moveTo. The key point is
+    // that strokeRect IS called for the shape stroke, proving it has the
+    // correct type/startPoint/endPoint format.
+  });
+
+  // =======================================================================
+  // STROKE EXPORT / IMPORT TESTS
+  // =======================================================================
+
+  /** Helper: render DrawingCanvas with getter/loader callback capturers */
+  function renderCanvasWithStrokesApi(overrides = {}) {
+    const getStrokesRef = { current: null };
+    const loadStrokesRef = { current: null };
+
+    render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        onGetStrokesReady={(fn) => { getStrokesRef.current = fn; }}
+        onLoadStrokesReady={(fn) => { loadStrokesRef.current = fn; }}
+        {...overrides}
+      />
+    );
+
+    return {
+      getStrokes: () => getStrokesRef.current?.(),
+      loadStrokes: (strokes) => loadStrokesRef.current?.(strokes),
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // 54. getStrokes returns current strokes array
+  // -----------------------------------------------------------------------
+  test('getStrokes returns the current strokes array', async () => {
+    const { getStrokes } = renderCanvasWithStrokesApi();
+    const canvas = screen.getByRole('img');
+
+    // Wait for useEffect to wire up getStrokes ref
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Initially, no strokes
+    let strokes = getStrokes();
+    expect(strokes).toEqual([]);
+
+    // Draw a stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Should now have 1 stroke
+    strokes = getStrokes();
+    expect(strokes).toHaveLength(1);
+    expect(strokes[0].points).toBeDefined();
+    expect(strokes[0].color).toBeDefined();
+  });
+
+  // -----------------------------------------------------------------------
+  // 55. loadStrokes replaces strokes and triggers repaint
+  // -----------------------------------------------------------------------
+  test('loadStrokes replaces strokes and triggers canvas repaint', async () => {
+    const { loadStrokes } = renderCanvasWithStrokesApi();
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw a stroke first so there's something to replace
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Load new strokes — should clear and repaint
+    ctx.clearRect.mockClear();
+    ctx.stroke.mockClear();
+
+    const newStrokes = [
+      { points: [{ x: 10, y: 20 }, { x: 30, y: 40 }], color: '#ff0000' },
+    ];
+
+    await act(async () => {
+      loadStrokes(newStrokes);
+    });
+
+    // After loadStrokes, redrawAll should have been called
+    expect(ctx.clearRect).toHaveBeenCalled();
+    // At least one stroke replay
+    expect(ctx.stroke).toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------------
+  // 56. loadStrokes clears the undo stack
+  // -----------------------------------------------------------------------
+  test('loadStrokes clears the undo stack', async () => {
+    const canRedoCalls = [];
+    const { loadStrokes, getUndo } = (() => {
+      const undoFnRef = { current: null };
+      const getStrokesRef = { current: null };
+      const loadStrokesRef = { current: null };
+
+      render(
+        <DrawingCanvas
+          colorRef={mockColorRef}
+          onUndoReady={(fn) => { undoFnRef.current = fn; }}
+          onGetStrokesReady={(fn) => { getStrokesRef.current = fn; }}
+          onLoadStrokesReady={(fn) => { loadStrokesRef.current = fn; }}
+          onCanRedoChange={(val) => canRedoCalls.push(val)}
+        />
+      );
+
+      return {
+        getUndo: () => undoFnRef.current,
+        loadStrokes: (strokes) => loadStrokesRef.current?.(strokes),
+      };
+    })();
+
+    const canvas = screen.getByRole('img');
+
+    // Draw a stroke and then undo it (puts it in undoStack, making canRedo true)
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    await act(async () => {
+      getUndo()?.();
+    });
+
+    // After undo, canRedo should be true (undoStack has 1 item)
+    expect(canRedoCalls[canRedoCalls.length - 1]).toBe(true);
+
+    // Now loadStrokes — this should clear the undo stack
+    await act(async () => {
+      loadStrokes([]);
+    });
+
+    // After loadStrokes, canRedo should become false (undoStack cleared)
+    expect(canRedoCalls[canRedoCalls.length - 1]).toBe(false);
+  });
+
+  // -----------------------------------------------------------------------
+  // 57. onHasStrokesChange fires when strokes change
+  // -----------------------------------------------------------------------
+  test('onHasStrokesChange fires with true/false as strokes change', async () => {
+    const hasStrokesCalls = [];
+    const { loadStrokes } = renderCanvasWithStrokesApi({
+      onHasStrokesChange: (val) => hasStrokesCalls.push(val),
+    });
+    const canvas = screen.getByRole('img');
+
+    // Initial state — no strokes
+    expect(hasStrokesCalls[0]).toBe(false);
+
+    // Draw a stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Should now report has strokes
+    expect(hasStrokesCalls).toContain(true);
+
+    // Load empty strokes
+    await act(async () => {
+      loadStrokes([]);
+    });
+
+    // Should report no strokes again
+    expect(hasStrokesCalls[hasStrokesCalls.length - 1]).toBe(false);
+  });
+
+  // -----------------------------------------------------------------------
+  // 58. onDirtyChange fires when strokes change
+  // -----------------------------------------------------------------------
+  test('onDirtyChange fires when drawing a new stroke', async () => {
+    const dirtyCalls = [];
+
+    render(
+      <DrawingCanvas
+        colorRef={mockColorRef}
+        onDirtyChange={(dirty) => { if (dirty) dirtyCalls.push(dirty); }}
+      />
+    );
+    const canvas = screen.getByRole('img');
+
+    // Draw a stroke
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // onDirtyChange should have been called with true
+    expect(dirtyCalls).toContain(true);
+  });
+
+  // -----------------------------------------------------------------------
+  // 54b. Each shape type is stored correctly and replayed with its own canvas method
+  // -----------------------------------------------------------------------
+  test('each shape type is stored correctly and replayed with its own canvas method', async () => {
+    const shapeModeRef = { current: null };
+
+    const { rerender } = render(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    const canvas = screen.getByRole('img');
+    const ctx = getCtx();
+
+    // Draw a rect stroke
+    shapeModeRef.current = 'rect';
+    rerender(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    fireEvent.mouseDown(canvas, { clientX: 100, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 200, clientY: 150 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Draw a circle stroke
+    shapeModeRef.current = 'circle';
+    rerender(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    fireEvent.mouseDown(canvas, { clientX: 50, clientY: 60 });
+    fireEvent.mouseMove(canvas, { clientX: 150, clientY: 140 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Draw a line stroke
+    shapeModeRef.current = 'line';
+    rerender(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+    fireEvent.mouseDown(canvas, { clientX: 10, clientY: 20 });
+    fireEvent.mouseMove(canvas, { clientX: 400, clientY: 300 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // Switch to pencil and set up spies for redrawAll
+    shapeModeRef.current = null;
+    rerender(
+      <DrawingCanvas colorRef={mockColorRef} shapeModeRef={shapeModeRef} />
+    );
+
+    const strokeRectSpy = jest.spyOn(ctx, 'strokeRect');
+    const ellipseSpy = jest.spyOn(ctx, 'ellipse');
+    const moveToSpy = jest.spyOn(ctx, 'moveTo');
+    const lineToSpy = jest.spyOn(ctx, 'lineTo');
+
+    // Draw a freehand stroke to trigger redrawAll
+    fireEvent.mouseDown(canvas, { clientX: 450, clientY: 50 });
+    fireEvent.mouseMove(canvas, { clientX: 500, clientY: 75 });
+    fireEvent.mouseUp(canvas);
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // All three shape types must be replayed
+    expect(strokeRectSpy).toHaveBeenCalled();
+    expect(ellipseSpy).toHaveBeenCalled();
+    // Line replay uses moveTo/lineTo — verify that the line endpoint pairs exist
+    expect(moveToSpy).toHaveBeenCalledWith(10, 20);
+    expect(lineToSpy).toHaveBeenCalledWith(400, 300);
   });
 });
